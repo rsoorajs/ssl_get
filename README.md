@@ -45,24 +45,37 @@ Test script:
 sh check_cert.sh
 ```
 
-## Cron
+## Cron Setup
 
+Either place a hook in `/etc/cron.d/`:
 
-Add cron:
+```sh
+sudo tee /etc/cron.d/ssl_cert_sync > /dev/null << 'EOF'
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+# Variable minute per VM (e.g. 15 8 * * 0)
+15 8 * * 0 root /etc/nginx/ssl_get/check_cert.sh > /dev/null
+EOF
+
+sudo chmod 0644 /etc/cron.d/ssl_cert_sync
+```
+
+or, use crontab:
 ```sh
 sudo crontab -e
 ```
 
 Add lines:
 ```sh
-5 8 * * 0 /etc/nginx/ssl_get/check_cert.sh
+15 8 * * 0 /etc/nginx/ssl_get/check_cert.sh
 ```
 
-This will verify expiration of local SSL certs once a week at 08:05
+This will verify expiration of local SSL certs once a week at 08:15
 and pull new certificates from the remote location, if expiring 
 within the next 14 days. Adjust this default time buffer in [check_cert.sh](check_cert.sh).
 
-Use (e.g.) [crontab.guru](https://crontab.guru/#5_8_*_*_*) to change
+Use (e.g.) [crontab.guru](https://crontab.guru/#15_8_*_*_*) to change
 frequency/ timespan. If you have multiple servers pulling certificates
 and if you are using FTP, provide some variance to avoid FTP Error 421 
 (Too many simultaneous connections).
@@ -75,23 +88,44 @@ To store your wildcard certificates from the ACME script on pfsense or
 opnsense in a remote folder, go to Services > Acme Certificates and click 
 on Edit SSL Certificate.
 
-1. Under Action list, add an action after "/etc/rc.restart_webgui" with the 
-following target
-```
-sh /conf/acme/ftp.sh
-```
-2. Create this script, to forward SSL certs to the central remote folder, e.g.
+1. Scroll to the `Action List` at the bottom.
+2. Add a new action:
+   - Command / Action: `Shell Command`
+   - Method: Run after certificate renewal (e.g., after or instead of `/etc/rc.restart_webgui`).
+   - Target: `sh /conf/acme/ftp.sh`
+3. SSH into pfSense and create `/conf/acme/ftp.sh`:
+
 ```sh
-ftp -n $HOST <<END_SCRIPT
-quote USER $USER
-quote PASS $PASSWD
+#!/bin/sh
+
+# Configuration
+FTP_HOST="192.168.1.1"
+FTP_USER="ftpuser"
+FTP_PASSWD="yourpassword"
+REMOTE_DIR="certs"
+
+# pfSense stores acme certs in /conf/acme/ (named after certificate or domain)
+CERT_DIR="/conf/acme"
+DOMAIN="wildcard.example.com"
+
+cd "$CERT_DIR" || exit 1
+
+ftp -n "$FTP_HOST" <<END_SCRIPT
+quote USER $FTP_USER
+quote PASS $FTP_PASSWD
 binary
-cd certs
+cd $REMOTE_DIR
 prompt
-mput $FILE
+mput ${DOMAIN}.fullchain ${DOMAIN}.key
 quit
 END_SCRIPT
+
 exit 0
+```
+
+Add executable bit:
+```bash
+chmod +x /conf/acme/ftp.sh
 ```
 
 <details><summary>Screenshot</summary>
@@ -103,15 +137,14 @@ exit 0
 
 ## Debug
 
-Inspect crontab logs
+Inspect crontab logs:
 ```sh
-sudo find /var/log/. -name \syslog.*.gz -print0 | xargs -0 zgrep "check_cert.sh"
-# or individual
+# systemd journal (Debian 12+, Ubuntu 22.04+)
+sudo journalctl -u cron -g "check_cert.sh"
+
+# or syslog
 sudo grep "check_cert.sh" /var/log/syslog
-sudo grep "check_cert.sh" /var/log/syslog.1
-sudo zgrep "check_cert.sh" /var/log/syslog.2.gz
-> Mar 21 08:05:01 cloud CRON[25307]: (root) CMD (/etc/nginx/check_cert.sh)
-...
+sudo find /var/log/. -name \syslog.*.gz -print0 | xargs -0 zgrep "check_cert.sh"
 ```
 
 Also, check mail:
@@ -153,7 +186,7 @@ Check expiration of web address manually:
 ```sh
 openssl s_client \
     -servername service.local.mytld.com \
-    -connect service.local.mytld.com:443 | openssl x509 -noout -dates
+    -connect service.local.mytld.com:443 </dev/null | openssl x509 -noout -dates
 ```
 
 Check SSL cert:
